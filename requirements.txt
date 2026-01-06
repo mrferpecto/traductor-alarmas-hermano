@@ -1,4 +1,2 @@
 streamlit
-pdf2docx
-python-docx
-deep-translator
+deepl
