@@ -1,22 +1,21 @@
 import streamlit as st
 from pdf2docx import Converter
 from docx import Document
-from docx.shared import Pt
-from docx.enum.text import WD_ALIGN_PARAGRAPH # Importante para justificar
+from docx.shared import Pt, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from deep_translator import GoogleTranslator
 import os
 import subprocess
-import re
 
-# Configuración de la página
-st.set_page_config(page_title="Traductor Alarmas PRO", page_icon="⚖️")
+# --- CONFIGURACIÓN ---
+st.set_page_config(page_title="Traductor Alarmas V5", page_icon="🔧")
 
-st.title("⚖️ Traductor Contratos (Formato Justificado)")
+st.title("🔧 Traductor V5 (Ajuste Inteligente)")
 st.markdown("""
-**Mejoras V4:**
-* Texto **Justificado** (alineado a ambos lados).
-* Tamaño de letra original (sin reducciones).
-* Corrección de palabras cortadas.
+**Correcciones aplicadas:**
+1. **Eliminación de huecos:** Se resetea el espaciado entre párrafos.
+2. **Auto-Escalado:** Si el texto traducido es muy largo, se reduce la letra para que quepa.
+3. **Alineación Izquierda:** Para evitar palabras cortadas y huecos raros.
 """)
 
 # --- FUNCIONES ---
@@ -24,64 +23,85 @@ st.markdown("""
 def traducir_texto(texto, idioma_destino):
     if not texto or len(texto) < 2:
         return texto
-    
-    # Limpieza previa: A veces los PDF traen palabras cortadas tipo "advan- ceds"
-    # Intentamos quitar guiones de final de línea si parecen errores
-    texto_limpio = texto.replace('-\n', '').replace('¬\n', '')
-    
+    # Limpiamos saltos de línea extraños dentro de frases
+    texto_limpio = texto.replace('-\n', '').replace('\n', ' ')
     try:
         return GoogleTranslator(source='auto', target=idioma_destino).translate(texto_limpio)
     except:
         return texto
 
-def copiar_estilo(run_origen, run_destino):
-    """Copia el estilo visual exacto del original"""
+def aplicar_estilo_seguro(run_origen, run_destino, factor_largo=1.0):
+    """
+    Copia el estilo pero reduce la fuente si el texto nuevo es mucho más largo
+    para evitar que se corte o rompa la maquetación.
+    """
     try:
+        # Copiar atributos básicos
         run_destino.bold = run_origen.bold
         run_destino.italic = run_origen.italic
-        run_destino.underline = run_origen.underline
         run_destino.font.name = run_origen.font.name
         
-        # Color
+        # Copiar color
         if run_origen.font.color and run_origen.font.color.rgb:
             run_destino.font.color.rgb = run_origen.font.color.rgb
         
-        # Tamaño: LO DEJAMOS IGUAL (Quitamos la reducción del 10% anterior)
-        if run_origen.font.size:
-            run_destino.font.size = run_origen.font.size
-            
+        # Lógica de Auto-Ajuste de tamaño
+        tamano_base = run_origen.font.size
+        if tamano_base:
+            # Si el texto creció más de un 20%, reducimos la fuente un poco
+            if factor_largo > 1.2:
+                nuevo_tamano = tamano_base.pt * 0.85 # Reducir 15%
+                run_destino.font.size = Pt(max(7, nuevo_tamano)) # Nunca menos de 7pt
+            else:
+                run_destino.font.size = tamano_base
     except:
         pass
 
+def limpiar_parrafo(parrafo):
+    """Elimina espaciados gigantescos (brutales) entre párrafos"""
+    pf = parrafo.paragraph_format
+    pf.space_before = Pt(2) # Solo 2 puntos de espacio antes
+    pf.space_after = Pt(2)  # Solo 2 puntos de espacio después
+    pf.line_spacing = 1.1   # Interlineado sencillo pero legible
+    pf.alignment = WD_ALIGN_PARAGRAPH.LEFT # Alineación izquierda segura
+
 def procesar_bloque(bloque, lang_code):
-    """Procesa párrafo aplicando justificación"""
-    if not bloque.text.strip():
+    text_raw = bloque.text.strip()
+    if not text_raw:
         return
 
-    # 1. Capturar estilo del primer trozo
-    estilo_referencia = None
+    # 1. Analizar estilo original (usamos el primer run con contenido)
+    estilo_ref = None
+    len_original = len(text_raw)
+    
     for run in bloque.runs:
         if run.text.strip():
-            estilo_referencia = run
+            estilo_ref = run
             break
-    
-    if not estilo_referencia:
+            
+    if not estilo_ref:
         return
 
     # 2. Traducir
-    texto_original = bloque.text
-    texto_traducido = traducir_texto(texto_original, lang_code)
+    traduccion = traducir_texto(text_raw, lang_code)
+    len_traduccion = len(traduccion)
+    
+    # Calculamos cuánto ha crecido el texto
+    factor_crecimiento = len_traduccion / len_original if len_original > 0 else 1
 
     # 3. Reemplazar contenido
     bloque.clear()
-    nuevo_run = bloque.add_run(texto_traducido)
+    nuevo_run = bloque.add_run(traduccion)
     
-    # 4. Aplicar estilo original
-    copiar_estilo(estilo_referencia, nuevo_run)
+    # 4. Aplicar estilo con inteligencia
+    aplicar_estilo_seguro(estilo_ref, nuevo_run, factor_crecimiento)
     
-    # 5. --- MAGIA NUEVA: JUSTIFICAR EL TEXTO ---
-    # Esto obliga a que el texto se estire de izquierda a derecha
-    bloque.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+    # 5. Arreglar espaciados del párrafo contenedor
+    if hasattr(bloque, 'paragraph_format'):
+        limpiar_parrafo(bloque)
+    else:
+        # Si es una celda, a veces hay que acceder a sus párrafos internos
+        pass 
 
 def procesar_documento(input_pdf, lang_code):
     base_name = os.path.splitext(input_pdf)[0]
@@ -89,38 +109,38 @@ def procesar_documento(input_pdf, lang_code):
     
     # 1. PDF -> DOCX
     cv = Converter(input_pdf)
-    # intersection_X_tolerance: Ayuda a que no cree cajas de texto demasiado estrechas
+    # intersection_X_tolerance alto ayuda a fusionar columnas rotas
     cv.convert(temp_docx, start=0, end=None)
     cv.close()
 
-    # 2. Traducir el DOCX
+    # 2. Procesar DOCX
     doc = Document(temp_docx)
     total_bloques = len(doc.paragraphs) + len(doc.tables)
     bar = st.progress(0)
     contador = 0
     
-    # Párrafos
+    # Párrafos sueltos
     for para in doc.paragraphs:
         procesar_bloque(para, lang_code)
         contador += 1
         if contador % 10 == 0: bar.progress(min(contador/total_bloques, 0.8))
-            
-    # Tablas
+
+    # Tablas (Iteramos celda por celda)
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
-                for paragraph in cell.paragraphs:
-                    procesar_bloque(paragraph, lang_code)
+                for p in cell.paragraphs:
+                    procesar_bloque(p, lang_code)
+                    # Forzar limpieza de espacios en celdas de tabla también
+                    limpiar_parrafo(p)
         contador += 1
-    
+
     bar.progress(0.9)
     doc.save(temp_docx)
     
-    # 3. DOCX -> PDF con LibreOffice
-    st.info("Generando PDF justificado y limpio...")
+    # 3. DOCX -> PDF
+    st.info("Generando PDF final optimizado...")
     cwd = os.getcwd()
-    
-    # Usamos subprocess para llamar a LibreOffice
     cmd = ['libreoffice', '--headless', '--convert-to', 'pdf', temp_docx, '--outdir', cwd]
     subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     
@@ -131,14 +151,12 @@ def procesar_documento(input_pdf, lang_code):
 
 # --- INTERFAZ ---
 
-uploaded_file = st.file_uploader("Sube el PDF (Versión V4 Justificada)", type=["pdf"])
-
+uploaded_file = st.file_uploader("Sube PDF (Versión V5 Reparada)", type=["pdf"])
 idiomas = {"Alemán": "de", "Inglés": "en", "Francés": "fr", "Holandés": "nl", "Italiano": "it"}
 target = st.selectbox("Idioma:", list(idiomas.keys()))
 
-if uploaded_file and st.button("TRADUCIR", type="primary"):
-    
-    with st.spinner('Traduciendo y justificando textos...'):
+if uploaded_file and st.button("TRADUCIR Y ARREGLAR", type="primary"):
+    with st.spinner('Procesando... Aplicando reducción de espacios y ajuste de texto...'):
         try:
             nombre_entrada = "entrada.pdf"
             with open(nombre_entrada, "wb") as f:
@@ -147,19 +165,16 @@ if uploaded_file and st.button("TRADUCIR", type="primary"):
             pdf_resultante, docx_temp = procesar_documento(nombre_entrada, idiomas[target])
             
             if os.path.exists(pdf_resultante):
-                st.success("¡Traducción completada!")
+                st.success("¡Listo!")
                 with open(pdf_resultante, "rb") as f:
-                    st.download_button("📥 DESCARGAR PDF", f, file_name=f"Traducido_{target}.pdf")
-                
+                    st.download_button("📥 DESCARGAR PDF", f, file_name=f"Contrato_{target}.pdf")
                 # Limpieza
                 try:
                     os.remove(nombre_entrada)
                     os.remove(docx_temp)
                     os.remove(pdf_resultante)
-                except:
-                    pass
+                except: pass
             else:
-                st.error("Error al generar el archivo final.")
-                
+                st.error("Error al generar PDF.")
         except Exception as e:
             st.error(f"Error: {e}")
