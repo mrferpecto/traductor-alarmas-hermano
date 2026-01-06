@@ -12,30 +12,28 @@ El formato, las tablas, las fotos y las negritas se mantendrán **exactos** al o
 """)
 
 # --- CONFIGURACIÓN DE LA CLAVE ---
-# Cajita en la barra lateral para poner la clave
 st.sidebar.header("Configuración")
-api_key = st.sidebar.text_input("Pega tu API Key aquí:", type="password", help="La clave que empieza por BT... o similar")
+# Aviso: La clave suele acabar en :fx
+api_key = st.sidebar.text_input("Pega tu API Key completa:", type="password", help="Ejemplo: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx:fx")
 
-# Si no hay clave, paramos
 if not api_key:
-    st.warning("👈 Para empezar, pega la clave API que has conseguido en el menú de la izquierda.")
+    st.warning("👈 Pega la clave API en el menú de la izquierda.")
     st.stop()
 
 # --- PROCESO DE TRADUCCIÓN ---
 try:
-    # Conectamos con DeepL
     translator = deepl.Translator(api_key)
-    
-    # Mostramos saldo disponible (opcional, para verificar que la clave va bien)
     usage = translator.get_usage()
     if usage.character.limit > 0:
         porc = usage.character.count / usage.character.limit
         st.sidebar.progress(porc)
-        st.sidebar.caption(f"Consumo: {usage.character.count} / {usage.character.limit} caracteres")
+        st.sidebar.caption(f"Consumo: {usage.character.count} / {usage.character.limit}")
 
+except deepl.AuthorizationException:
+    st.sidebar.error("❌ La clave es incorrecta. Parece incompleta o mal copiada.")
+    st.stop()
 except Exception as e:
-    # Si la clave está mal, avisamos
-    st.sidebar.error("❌ La clave parece incorrecta o no funciona. Revisa que la has copiado bien.")
+    st.sidebar.error(f"Error de conexión: {e}")
     st.stop()
 
 # --- SUBIDA Y TRADUCCIÓN ---
@@ -58,21 +56,19 @@ if uploaded_file and st.button("TRADUCIR DOCUMENTO", type="primary"):
     
     with st.spinner('Enviando a DeepL... Manteniendo diseño original...'):
         try:
-            # DeepL necesita archivos en disco, no en memoria RAM
             input_filename = "entrada.pdf"
             output_filename = "salida.pdf"
             
             with open(input_filename, "wb") as f:
                 f.write(uploaded_file.getbuffer())
             
-            # ¡LA MAGIA! Esta función traduce respetando el PDF
+            # TRADUCCIÓN
             translator.translate_document_from_filepath(
                 input_filename,
                 output_filename,
                 target_lang=target_code
             )
             
-            # Botón de descarga
             with open(output_filename, "rb") as f:
                 st.success("✅ ¡Traducción perfecta completada!")
                 st.download_button(
@@ -82,13 +78,13 @@ if uploaded_file and st.button("TRADUCIR DOCUMENTO", type="primary"):
                     mime="application/pdf"
                 )
             
-            # Borrar archivos temporales
             os.remove(input_filename)
             os.remove(output_filename)
 
-        except deepl.DocumentTranslationLimitExceeded:
+        # AQUÍ ESTABA EL ERROR ANTES, YA ESTÁ CORREGIDO:
+        except deepl.QuotaExceededException:
             st.error("Has gastado el límite gratuito de caracteres de DeepL este mes.")
         except deepl.AuthorizationException:
-            st.error("La clave API no es válida. Comprueba que no falte ningún carácter.")
+            st.error("La clave API no es válida. Revisa que la has copiado entera.")
         except Exception as e:
             st.error(f"Error inesperado: {e}")
